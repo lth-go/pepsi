@@ -4,7 +4,6 @@ use std::iter::Peekable;
 use std::mem;
 
 #[derive(Debug, PartialEq)]
-#[allow(dead_code)]
 pub enum Token {
     And,             // and
     Break,           // break
@@ -47,7 +46,7 @@ pub enum Token {
     GreEq,           // >=
     Less,            // <
     Greater,         // >
-    Addsign,         // =
+    Assign,          // =
     ParL,            // (
     ParR,            // )
     CurlyL,          // {
@@ -97,11 +96,15 @@ impl<R: Read> Lex<R> {
         &self.ahead
     }
 
+    pub fn expect(&mut self, t: Token) {
+        assert_eq!(self.next(), t);
+    }
+
     pub fn do_next(&mut self) -> Token {
         if let Some(b) = self.next_byte() {
             match b {
                 b' ' | b'\r' | b'\n' | b'\t' => self.do_next(),
-                b'+' => Token::And,
+                b'+' => Token::Add,
                 b'*' => Token::Mul,
                 b'%' => Token::Mod,
                 b'^' => Token::Pow,
@@ -117,7 +120,7 @@ impl<R: Read> Lex<R> {
                 b';' => Token::SemiColon,
                 b',' => Token::Comma,
                 b'/' => self.check_ahead(b'/', Token::Idiv, Token::Div),
-                b'=' => self.check_ahead(b'=', Token::Equal, Token::Addsign),
+                b'=' => self.check_ahead(b'=', Token::Equal, Token::Assign),
                 b'~' => self.check_ahead(b'=', Token::NotEq, Token::BitXor),
                 b':' => self.check_ahead(b':', Token::DoubColon, Token::Colon),
                 b'<' => self.check_ahead2(b'=', Token::LesEq, b'<', Token::ShiftL, Token::Less),
@@ -175,14 +178,7 @@ impl<R: Read> Lex<R> {
         }
     }
 
-    fn check_ahead2(
-        &mut self,
-        ahead1:u8,
-        long1: Token,
-        ahead2: u8,
-        long2: Token,
-        short: Token,
-    ) -> Token {
+    fn check_ahead2(&mut self, ahead1: u8, long1: Token, ahead2: u8, long2: Token, short: Token) -> Token {
         let b = self.peek_byte();
         if b == ahead1 {
             self.next_byte();

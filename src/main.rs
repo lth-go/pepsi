@@ -1,4 +1,4 @@
-use std::{env, fs::File};
+use std::{env, fs::File, io::BufReader};
 
 mod bytecode;
 mod lex;
@@ -14,6 +14,6 @@ fn main() {
     }
 
     let file = File::open(&args[1]).unwrap();
-    let proto = parse::ParseProto::load(file);
+    let proto = parse::ParseProto::load(BufReader::new(file));
     vm::ExeState::new().execute(&proto);
 }
