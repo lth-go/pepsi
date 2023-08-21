@@ -1,3 +1,6 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::fmt::write;
 use std::mem;
 use std::{fmt, hash::Hash, hash::Hasher, rc::Rc};
 
@@ -15,21 +18,55 @@ pub enum Value {
     ShortStr(u8, [u8; SHORT_STR_MAX]),
     MidStr(Rc<(u8, [u8; MID_STR_MAX])>),
     LongStr(Rc<Vec<u8>>),
+    Table(Rc<RefCell<Table>>),
     Function(fn(&mut ExeState) -> i32),
+}
+
+pub struct Table {
+    pub array: Vec<Value>,
+    pub map: HashMap<Value, Value>,
+}
+
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        match self {
+            Value::Nil => write!(f, "nil"),
+            Value::Boolean(v) => write!(f, "{v}"),
+            Value::Interger(v) => write!(f, "{v}"),
+            Value::Float(v) => write!(f, "{v:?}"),
+            Value::ShortStr(len, buf) => {
+                write!(f, "{}", String::from_utf8_lossy(&buf[..*len as usize]))
+            }
+            Value::MidStr(v) => write!(f, "{}", String::from_utf8_lossy(&v.1[..v.0 as usize])),
+            Value::LongStr(v) => write!(f, "{}", String::from_utf8_lossy(&v)),
+            Value::Table(v) => write!(f, "table: {:?}", Rc::as_ptr(v)),
+            Value::Function(_) => write!(f, "function"),
+        }
+    }
 }
 
 impl fmt::Debug for Value {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         match self {
             Value::Nil => write!(f, "nil"),
-            Value::Boolean(b) => write!(f, "{b}"),
-            Value::Interger(i) => write!(f, "{i}"),
-            Value::Float(n) => write!(f, "{n:?}"),
+            Value::Boolean(v) => write!(f, "{v}"),
+            Value::Interger(v) => write!(f, "{v}"),
+            Value::Float(v) => write!(f, "{v:?}"),
             Value::ShortStr(len, buf) => {
-                write!(f, "{}", String::from_utf8_lossy(&buf[..*len as usize]))
+                write!(
+                    f,
+                    "SS: '{}'",
+                    String::from_utf8_lossy(&buf[..*len as usize])
+                )
             }
-            Value::MidStr(s) => write!(f, "{}", String::from_utf8_lossy(&s.1[..s.0 as usize])),
-            Value::LongStr(s) => write!(f, "{}", String::from_utf8_lossy(&s)),
+            Value::MidStr(v) => {
+                write!(f, "MS: '{}'", String::from_utf8_lossy(&v.1[..v.0 as usize]))
+            }
+            Value::LongStr(v) => write!(f, "LS: '{}'", String::from_utf8_lossy(&v)),
+            Value::Table(v) => {
+                let v = v.borrow();
+                write!(f, "table: {}:{}", v.array.len(), v.map.len())
+            }
             Value::Function(_) => write!(f, "function"),
         }
     }
@@ -39,9 +76,9 @@ impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Value::Nil, Value::Nil) => true,
-            (Value::Boolean(b1), Value::Boolean(b2)) => *b1 == *b2,
-            (Value::Interger(i1), Value::Interger(i2)) => *i1 == *i2,
-            (Value::Float(f1), Value::Float(f2)) => *f1 == *f2,
+            (Value::Boolean(v1), Value::Boolean(v2)) => *v1 == *v2,
+            (Value::Interger(v1), Value::Interger(v2)) => *v1 == *v2,
+            (Value::Float(v1), Value::Float(v2)) => *v1 == *v2,
             (Value::ShortStr(len1, s1), Value::ShortStr(len2, s2)) => {
                 s1[..*len1 as usize] == s2[..*len2 as usize]
             }
@@ -49,7 +86,8 @@ impl PartialEq for Value {
                 s1.1[..s1.0 as usize] == s2.1[..s2.0 as usize]
             }
             (Value::LongStr(s1), Value::LongStr(s2)) => s1 == s2,
-            (Value::Function(f1), Value::Function(f2)) => std::ptr::eq(f1, f2),
+            (Value::Table(v1), Value::Table(v2)) => Rc::ptr_eq(v1, v2),
+            (Value::Function(v1), Value::Function(v2)) => std::ptr::eq(v1, v2),
             (_, _) => false,
         }
     }
@@ -63,10 +101,11 @@ impl Hash for Value {
             Self::Nil => (),
             Self::Boolean(v) => v.hash(state),
             Value::Interger(v) => v.hash(state),
-            Value::Float(v) => unsafe { mem::transmute::<f64, u64>(*v).hash(state) },
+            Value::Float(v) => unsafe { mem::transmute::<f64, i64>(*v).hash(state) },
             Value::ShortStr(len, buf) => buf[..*len as usize].hash(state),
             Value::MidStr(v) => v.1[..v.0 as usize].hash(state),
             Value::LongStr(v) => v.hash(state),
+            Value::Table(v) => Rc::as_ptr(v).hash(state),
             Value::Function(v) => (*v as *const usize).hash(state),
         }
     }
