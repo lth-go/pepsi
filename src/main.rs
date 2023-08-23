@@ -3,6 +3,7 @@ use std::{env, fs::File, io::BufReader};
 mod bytecode;
 mod lex;
 mod parse;
+mod utils;
 mod value;
 mod vm;
 
