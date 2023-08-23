@@ -34,7 +34,7 @@ pub enum Token {
     Mod,             // %
     Pow,             // ^
     Len,             // #
-    BitAdd,          // &
+    BitAnd,          // &
     BitNot,          // ~
     BitOr,           // |
     ShiftL,          // <<
@@ -109,7 +109,7 @@ impl<R: Read> Lex<R> {
                 b'%' => Token::Mod,
                 b'^' => Token::Pow,
                 b'#' => Token::Len,
-                b'&' => Token::BitAdd,
+                b'&' => Token::BitAnd,
                 b'|' => Token::BitOr,
                 b'(' => Token::ParL,
                 b')' => Token::ParR,

@@ -1,4 +1,3 @@
-use core::slice::SlicePattern;
 use std::cmp::Ordering;
 use std::io::Read;
 
@@ -266,7 +265,7 @@ impl<R: Read> ParseProto<R> {
     //   A' ::= binop exp A' | Epsilon
     fn exp(&mut self) -> ExpDesc {
         let ahead = self.lex.next();
-        self.exp_with_ahead(ahead)
+        self.exp_limit(0)
     }
 
     fn exp_limit(&mut self, limit: i32) -> ExpDesc {
@@ -275,22 +274,44 @@ impl<R: Read> ParseProto<R> {
     }
 
     fn exp_with_ahead(&mut self, ahead: Token) -> ExpDesc {
-        match ahead {
+        self.do_exp(0, ahead)
+    }
+
+    fn do_exp(&mut self, limit: i32, ahead: Token) -> ExpDesc {
+        let mut desc = match ahead {
             Token::Nil => ExpDesc::Nil,
             Token::True => ExpDesc::Boolean(true),
             Token::False => ExpDesc::Boolean(false),
             Token::Interger(i) => ExpDesc::Interger(i),
             Token::Float(f) => ExpDesc::Float(f),
             Token::String(s) => ExpDesc::String(s),
+
+            Token::Dots => todo!("dots"),
             Token::Function => todo!("Function"),
             Token::CurlyL => self.table_constructor(),
-            Token::Sub | Token::Not | Token::BitNot | Token::Len => todo!("unop"),
-            Token::Dots => todo!("dots"),
+
+            Token::Sub => self.unop_neg(),
+            Token::Not => self.unop_not(),
+            Token::BitNot => self.unop_bitnot(),
+            Token::Len => self.unop_len(),
             t => self.prefixexp(t),
+        };
+
+        loop {
+            let (left_pri, right_pri) = binop_pri(self.lex.peek());
+            if left_pri <= limit {
+                return desc;
+            }
+
+            if !matches!(desc, ExpDesc::Interger(_) | ExpDesc::Float(_) | ExpDesc::String(_)) {
+                desc = ExpDesc::Local(self.discharge_top(desc));
+            }
+
+            let binop = self.lex.next();
+            let right_desc = self.exp_limit(right_pri);
+            desc = self.process_binop(binop, desc, right_desc);
         }
     }
-
-    fn do_exp(&mut self, limit: i32, ahead: Token) -> ExpDesc {}
 
     // use for unary operand
     fn exp_unop(&mut self) -> ExpDesc {
@@ -379,17 +400,64 @@ impl<R: Read> ParseProto<R> {
         }
     }
 
-    fn unop_neg(&mut self) -> ExpDesc {}
+    fn unop_neg(&mut self) -> ExpDesc {
+        match self.exp_unop() {
+            ExpDesc::Interger(v) => ExpDesc::Interger(-v),
+            ExpDesc::Float(v) => ExpDesc::Float(-v),
+            ExpDesc::Nil | ExpDesc::Boolean(_) | ExpDesc::String(_) => panic!("invalid - operator"),
+            desc => ExpDesc::UnaryOp(ByteCode::Neg, self.discharge_top(desc)),
+        }
+    }
 
-    fn unop_not(&mut self) -> ExpDesc {}
+    fn unop_not(&mut self) -> ExpDesc {
+        match self.exp_unop() {
+            ExpDesc::Nil => ExpDesc::Boolean(true),
+            ExpDesc::Boolean(v) => ExpDesc::Boolean(!v),
+            ExpDesc::Interger(_) | ExpDesc::Float(_) | ExpDesc::String(_) => ExpDesc::Boolean(false),
+            desc => ExpDesc::UnaryOp(ByteCode::Not, self.discharge_top(desc)),
+        }
+    }
 
-    fn unop_bitnot(&mut self) -> ExpDesc {}
+    fn unop_bitnot(&mut self) -> ExpDesc {
+        match self.exp_unop() {
+            ExpDesc::Interger(v) => ExpDesc::Interger(!v),
+            ExpDesc::Nil | ExpDesc::Boolean(_) | ExpDesc::Float(_) | ExpDesc::String(_) => panic!("invalid ~ operator"),
+            desc => ExpDesc::UnaryOp(ByteCode::BitNot, self.discharge_top(desc)),
+        }
+    }
 
-    fn unop_len(&mut self) -> ExpDesc {}
+    fn unop_len(&mut self) -> ExpDesc {
+        match self.exp_unop() {
+            ExpDesc::String(v) => ExpDesc::Interger(v.len() as i64),
+            ExpDesc::Nil | ExpDesc::Boolean(_) | ExpDesc::Interger(_) | ExpDesc::Float(_) => panic!("invalid ~ operator"),
+            desc => ExpDesc::UnaryOp(ByteCode::Len, self.discharge_top(desc)),
+        }
+    }
 
-    fn process_binop(&mut self, binop: Token, left: ExpDesc, right: ExpDesc) -> ExpDesc {}
+    fn process_binop(&mut self, binop: Token, left: ExpDesc, right: ExpDesc) -> ExpDesc {
+        if let Some(r) = fold_const(&binop, &left, &right) {
+            return r;
+        }
 
-    fn do_binop(&mut self, mut binop: Token, mut left: ExpDesc, mut right: ExpDesc, opr: fn(u8, u8, u8) -> ByteCode, opi: fn(u8, u8, u8) -> ByteCode, opk: fn(u8, u8, u8) -> ByteCode) -> ExpDesc {
+        match binop {
+            Token::Add => self.do_binop(left, right, ByteCode::Add, ByteCode::AddInt, ByteCode::AddConst),
+            Token::Sub => self.do_binop(left, right, ByteCode::Sub, ByteCode::SubInt, ByteCode::SubConst),
+            Token::Mul => self.do_binop(left, right, ByteCode::Mul, ByteCode::MulInt, ByteCode::MulConst),
+            Token::Mod => self.do_binop(left, right, ByteCode::Mod, ByteCode::ModInt, ByteCode::ModConst),
+            Token::Idiv => self.do_binop(left, right, ByteCode::Div, ByteCode::DivInt, ByteCode::DivConst),
+            Token::Div => self.do_binop(left, right, ByteCode::Div, ByteCode::DivInt, ByteCode::DivConst),
+            Token::Pow => self.do_binop(left, right, ByteCode::Pow, ByteCode::PowInt, ByteCode::PowConst),
+            Token::BitAnd => self.do_binop(left, right, ByteCode::BitAnd, ByteCode::BitAndInt, ByteCode::BitAndConst),
+            Token::BitNot => self.do_binop(left, right, ByteCode::BitXor, ByteCode::BitXorInt, ByteCode::BitXorConst),
+            Token::BitOr => self.do_binop(left, right, ByteCode::BitOr, ByteCode::BitOrInt, ByteCode::BitOrConst),
+            Token::ShiftL => self.do_binop(left, right, ByteCode::ShiftL, ByteCode::ShiftLInt, ByteCode::ShiftLConst),
+            Token::ShiftR => self.do_binop(left, right, ByteCode::ShiftR, ByteCode::ShiftRInt, ByteCode::ShiftRConst),
+            Token::Concat => self.do_binop(left, right, ByteCode::Concat, ByteCode::ConcatInt, ByteCode::ConcatConst),
+            _ => panic!("impossible"),
+        }
+    }
+
+    fn do_binop(&mut self, mut left: ExpDesc, mut right: ExpDesc, opr: fn(u8, u8, u8) -> ByteCode, opi: fn(u8, u8, u8) -> ByteCode, opk: fn(u8, u8, u8) -> ByteCode) -> ExpDesc {
         if opr == ByteCode::Add || opr == ByteCode::Mul {
             if matches!(left, ExpDesc::Interger(_) | ExpDesc::Float(_)) {
                 // swap the left-const-operand to right, in order to use opi/opk
@@ -609,7 +677,7 @@ fn binop_pri(binop: &Token) -> (i32, i32) {
         Token::Add | Token::Sub => (10, 10),
         Token::Concat => (9, 8),
         Token::ShiftL | Token::ShiftR => (7, 7),
-        Token::BitAdd => (6, 6),
+        Token::BitAnd => (6, 6),
         Token::BitNot => (5, 5),
         Token::BitOr => (4, 4),
         Token::Equal | Token::NotEq | Token::Less | Token::Greater | Token::LesEq | Token::GreEq => (3, 3),
@@ -630,7 +698,7 @@ fn fold_const(binop: &Token, left: &ExpDesc, right: &ExpDesc) -> Option<ExpDesc>
         Token::Div => do_fold_const_float(left, right, |a, b| a / b),
         Token::Pow => do_fold_const_float(left, right, |a, b| a.powf(b)),
 
-        Token::BitAdd => do_fold_const_int(left, right, |a, b| a & b),
+        Token::BitAnd => do_fold_const_int(left, right, |a, b| a & b),
         Token::BitNot => do_fold_const_int(left, right, |a, b| a ^ b),
         Token::BitOr => do_fold_const_int(left, right, |a, b| a | b),
         Token::ShiftL => do_fold_const_int(left, right, |a, b| a << b),
