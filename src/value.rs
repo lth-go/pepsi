@@ -5,9 +5,10 @@ use std::hash::{Hash, Hasher};
 use std::mem;
 use std::rc::Rc;
 
+use crate::utils::ftoi;
 use crate::vm::ExeState;
 
-const SHORT_STR_MAX: usize = 14;
+const SHORT_STR_MAX: usize = 14; // sizeof(Value) - 1(tag) - 1(len)
 const MID_STR_MAX: usize = 48 - 1;
 
 #[derive(Clone)]
@@ -30,7 +31,7 @@ pub struct Table {
 
 impl Table {
     pub fn new(narray: usize, nmap: usize) -> Self {
-        Table {
+        Self {
             array: Vec::with_capacity(narray),
             map: HashMap::with_capacity(nmap),
         }
@@ -103,7 +104,13 @@ impl Hash for Value {
             Self::Nil => (),
             Self::Boolean(v) => v.hash(state),
             Value::Interger(v) => v.hash(state),
-            Value::Float(v) => unsafe { mem::transmute::<f64, i64>(*v).hash(state) },
+            Value::Float(v) => {
+                if let Some(i) = ftoi(*v) {
+                    i.hash(state)
+                } else {
+                    unsafe { mem::transmute::<f64, i64>(*v).hash(state) }
+                }
+            }
             Value::ShortStr(len, buf) => buf[..*len as usize].hash(state),
             Value::MidStr(v) => v.1[..v.0 as usize].hash(state),
             Value::LongStr(v) => v.hash(state),
