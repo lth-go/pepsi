@@ -466,7 +466,7 @@ fn exp_binop_int_i(v1: &Value, v2: u8, arith_i: fn(i64, i64) -> i64) -> Value {
     let i1 = match v1 {
         Value::Interger(i1) => *i1,
         Value::Float(f1) => ftoi(*f1).unwrap(),
-        _ => todo!("meta),"),
+        _ => todo!("meta"),
     };
 
     Value::Interger(arith_i(i1, v2 as i64))
