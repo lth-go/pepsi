@@ -264,7 +264,6 @@ impl<R: Read> ParseProto<R> {
     // where:
     //   A' ::= binop exp A' | Epsilon
     fn exp(&mut self) -> ExpDesc {
-        let ahead = self.lex.next();
         self.exp_limit(0)
     }
 
