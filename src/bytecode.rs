@@ -24,6 +24,14 @@ pub enum ByteCode {
     GetTable(u8, u8, u8),      //
     GetField(u8, u8, u8),      //
     GetInt(u8, u8, u8),        //
+    
+    // condition structures
+    Test(u8, i16),
+    Jump(i16),
+
+    // for-loop
+    ForPrepare(u8, u16),
+    ForLoop(u8, u16),
 
     // function call
     Call(u8, u8), //

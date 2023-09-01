@@ -33,8 +33,10 @@ impl ExeState {
     }
 
     pub fn execute<R: Read>(&mut self, proto: &ParseProto<R>) {
-        for code in proto.byte_codes.iter() {
-            match *code {
+        let mut pc = 0;
+        while pc < proto.byte_codes.len() {
+            println!("  [{pc}]\t{:?}", proto.byte_codes[pc]);
+            match proto.byte_codes[pc] {
                 ByteCode::GetGlobal(dst, name) => {
                     let name: &str = (&proto.constants[name as usize]).into();
                     let v = self.globals.get(name).unwrap_or(&Value::Nil).clone();
@@ -122,6 +124,66 @@ impl ExeState {
                     let value = self.get_table(t, key);
                     self.set_stack(dst, value);
                 }
+                ByteCode::Test(icond, jmp) => {
+                    let cond = &self.stack[icond as usize];
+                    if matches!(cond, Value::Nil | Value::Boolean(false)) {
+                        pc = (pc as isize + jmp as isize) as usize;
+                    }
+                }
+                ByteCode::Jump(jmp) => {
+                    pc = (pc as isize + jmp as isize) as usize;
+                }
+                ByteCode::ForPrepare(dst, jmp) => {
+                    if let (&Value::Interger(mut i), &Value::Interger(step)) = (&self.stack[dst as usize], &self.stack[dst as usize + 2]) {
+                        if step == 0 {
+                            panic!("0 step in numerical for")
+                        }
+
+                        let limit = match self.stack[dst as usize + 1] {
+                            Value::Interger(limit) => limit,
+                            Value::Float(limit) => {
+                                let limit = for_int_limit(limit, step > 0, &mut i);
+                                self.set_stack(dst + 1, Value::Interger(limit));
+                                limit
+                            }
+                            _ => panic!("invalid limit type"),
+                        };
+                        if !for_check(i, limit, step > 0) {
+                            pc += jmp as usize;
+                        }
+                    } else {
+                        let i = self.make_float(dst);
+                        let limit = self.make_float(dst + 1);
+                        let step = self.make_float(dst + 2);
+                        if step == 0.0 {
+                            panic!("0 step in numerical for")
+                        }
+                        if !for_check(i, limit, step > 0.0) {
+                            pc += jmp as usize;
+                        }
+                    }
+                }
+                ByteCode::ForLoop(dst, jmp) => match self.stack[dst as usize] {
+                    Value::Interger(i) => {
+                        let limit = self.read_int(dst + 1);
+                        let step = self.read_int(dst + 2);
+                        let i = i + step;
+                        if for_check(i, limit, step > 0) {
+                            self.set_stack(dst, Value::Interger(i));
+                            pc -= jmp as usize;
+                        }
+                    }
+                    Value::Float(f) => {
+                        let limit = self.read_float(dst + 1);
+                        let step = self.read_float(dst + 2);
+                        let i = f + step;
+                        if for_check(i, limit, step > 0.0) {
+                            self.set_stack(dst, Value::Float(i));
+                            pc -= jmp as usize;
+                        }
+                    }
+                    _ => panic!("todo"),
+                },
                 ByteCode::Call(func, _) => {
                     self.func_index = func as usize;
                     let func = &self.stack[self.func_index];
@@ -321,6 +383,8 @@ impl ExeState {
                     self.set_stack(dst, v);
                 }
             }
+
+            pc += 1;
         }
     }
 
@@ -395,6 +459,34 @@ impl ExeState {
             table.map.get(key).unwrap_or(&Value::Nil).clone()
         } else {
             panic!("set invalid table")
+        }
+    }
+
+    fn make_float(&mut self, dst: u8) -> f64 {
+        match self.stack[dst as usize] {
+            Value::Float(v) => v,
+            Value::Interger(i) => {
+                let f = i as f64;
+                self.set_stack(dst, Value::Float(f));
+                f
+            }
+            ref v => panic!("not number {v:?}"),
+        }
+    }
+
+    fn read_int(&self, dst: u8) -> i64 {
+        if let Value::Interger(i) = self.stack[dst as usize] {
+            i
+        } else {
+            panic!("invalid interger");
+        }
+    }
+
+    fn read_float(&self, dst: u8) -> f64 {
+        if let Value::Float(f) = self.stack[dst as usize] {
+            f
+        } else {
+            panic!("invalid float");
         }
     }
 }
@@ -502,4 +594,30 @@ fn exp_concat(v1: &Value, v2: &Value) -> Value {
     };
 
     [v1, v2].concat().into()
+}
+
+fn for_check<T: PartialOrd>(i: T, limit: T, is_step_positive: bool) -> bool {
+    if is_step_positive {
+        i <= limit
+    } else {
+        i >= limit
+    }
+}
+
+fn for_int_limit(limit: f64, is_step_positive: bool, i: &mut i64) -> i64 {
+    if is_step_positive {
+        if limit < i64::MIN as f64 {
+            *i = 0;
+            -1
+        } else {
+            limit.floor() as i64
+        }
+    } else {
+        if limit > i64::MAX as f64 {
+            *i = 0;
+            1
+        } else {
+            limit.ceil() as i64
+        }
+    }
 }

@@ -38,13 +38,24 @@ enum ConstStack {
 }
 
 #[derive(Debug)]
+struct GotoLabel {
+    name: String,
+    icode: usize,
+    nvar: usize,
+}
+
+#[derive(Debug)]
 pub struct ParseProto<R: Read> {
     pub constants: Vec<Value>,     // 常量区
     pub byte_codes: Vec<ByteCode>, // 字节码
 
     sp: usize,           // 栈指针
     locals: Vec<String>, // 局部变量
-    lex: Lex<R>,         // lex
+    break_blocks: Vec<Vec<usize>>,
+    continue_blocks: Vec<Vec<(usize, usize)>>,
+    gotos: Vec<GotoLabel>,
+    labels: Vec<GotoLabel>,
+    lex: Lex<R>, // lex
 }
 
 impl<R: Read> ParseProto<R> {
@@ -54,6 +65,10 @@ impl<R: Read> ParseProto<R> {
             byte_codes: Vec::new(),
             sp: 0,
             locals: Vec::new(),
+            break_blocks: Vec::new(),
+            continue_blocks: Vec::new(),
+            gotos: Vec::new(),
+            labels: Vec::new(),
             lex: Lex::new(input),
         };
 
@@ -62,15 +77,19 @@ impl<R: Read> ParseProto<R> {
         println!("constaints: {:?}", &proto.constants);
         println!("byte_codes:");
 
-        for c in proto.byte_codes.iter() {
-            println!("  {:?}", c);
+        for (i, c) in proto.byte_codes.iter().enumerate() {
+            println!("  {i}\t{c:?}");
         }
 
         proto
     }
 
     fn chunk(&mut self) {
-        self.block()
+        assert_eq!(self.block(), Token::Eos);
+
+        if let Some(goto) = self.gotos.first() {
+            panic!("goto {} no destination", &goto.name);
+        }
     }
 
     // BNF:
@@ -90,13 +109,27 @@ impl<R: Read> ParseProto<R> {
     //     function funcname funcbody |
     //     local function Name funcbody |
     //     local attnamelist [`=` explist]
-    fn block(&mut self) {
+    fn block(&mut self) -> Token {
+        let nvar = self.locals.len();
+        let end_token = self.block_scope();
+        self.locals.truncate(nvar);
+        end_token
+    }
+
+    fn block_scope(&mut self) -> Token {
+        let igoto = self.gotos.len();
+        let ilabel = self.labels.len();
+
         loop {
             self.sp = self.locals.len();
 
             match self.lex.next() {
                 Token::SemiColon => (),
                 t @ Token::Name(_) | t @ Token::ParL => {
+                    if self.try_continue_stat(&t) {
+                        continue;
+                    }
+
                     let desc = self.prefixexp(t);
                     if desc == ExpDesc::Call {
                     } else {
@@ -104,8 +137,18 @@ impl<R: Read> ParseProto<R> {
                     }
                 }
                 Token::Local => self.local(),
-                Token::Eos => break,
-                t => panic!("unexpected token: {t:?}"),
+                Token::If => self.if_stat(),
+                Token::While => self.while_stat(),
+                Token::Repeat => self.repeat_stat(),
+                Token::For => self.for_stat(),
+                Token::Break => self.break_stat(),
+                Token::Do => self.do_stat(),
+                Token::DoubColon => self.label_stat(),
+                Token::Goto => self.goto_stat(),
+                t => {
+                    self.close_goto_labels(igoto, ilabel);
+                    break t;
+                }
             }
         }
     }
@@ -186,6 +229,259 @@ impl<R: Read> ParseProto<R> {
             nfexp -= 1;
             self.assign_from_stack(var, exp_sp0 + nfexp);
         }
+    }
+
+    // BNF:
+    //   if exp then block {elseif exp then block} [else block] end
+    fn if_stat(&mut self) {
+        let mut jmp_ends = Vec::new();
+
+        // if exp then block
+        let mut end_token = self.do_if_block(&mut jmp_ends);
+
+        // elseif exp then block
+        while end_token == Token::Elseif {
+            end_token = self.do_if_block(&mut jmp_ends);
+        }
+
+        // else block
+        if end_token == Token::Else {
+            end_token = self.block();
+        }
+
+        assert_eq!(end_token, Token::End);
+
+        let iend = self.byte_codes.len() - 1;
+        for i in jmp_ends.into_iter() {
+            self.byte_codes[i] = ByteCode::Jump((iend - i) as i16);
+        }
+    }
+
+    fn do_if_block(&mut self, jmp_ends: &mut Vec<usize>) -> Token {
+        let icond = self.exp_discharge_any();
+        self.lex.expect(Token::Then);
+
+        self.byte_codes.push(ByteCode::Test(0, 0));
+        let itest = self.byte_codes.len() - 1;
+
+        let end_token = self.block();
+
+        if matches!(end_token, Token::Elseif | Token::Else) {
+            self.byte_codes.push(ByteCode::Jump(0));
+            jmp_ends.push(self.byte_codes.len() - 1);
+        }
+
+        let iend = self.byte_codes.len() - 1;
+        self.byte_codes[itest] = ByteCode::Test(icond as u8, (iend - itest) as i16);
+
+        end_token
+    }
+
+    // BNF:
+    //   while exp do block end
+    fn while_stat(&mut self) {
+        let istart = self.byte_codes.len();
+
+        let icond = self.exp_discharge_any();
+        self.lex.expect(Token::Do);
+
+        self.byte_codes.push(ByteCode::Test(0, 0));
+        let itest = self.byte_codes.len() - 1;
+
+        self.push_loop_block();
+
+        assert_eq!(self.block(), Token::End);
+
+        let iend = self.byte_codes.len();
+
+        self.byte_codes.push(ByteCode::Jump(-((iend - istart) as i16) - 1));
+
+        self.pop_loop_block(istart);
+
+        self.byte_codes[itest] = ByteCode::Test(icond as u8, (iend - itest) as i16);
+    }
+
+    // BNF:
+    //   repeat block until exp
+    fn repeat_stat(&mut self) {
+        let istart = self.byte_codes.len();
+
+        self.push_loop_block();
+
+        let nvar = self.locals.len();
+
+        assert_eq!(self.block_scope(), Token::Until);
+        let iend1 = self.byte_codes.len();
+
+        let icond = self.exp_discharge_any();
+
+        let iend2 = self.byte_codes.len();
+        self.byte_codes.push(ByteCode::Test(icond as u8, -((iend2 - istart + 1) as i16)));
+
+        self.pop_loop_block(iend1);
+
+        self.locals.truncate(nvar);
+    }
+
+    // * numerical: for Name `=` ...
+    // * generic:   for Name {, Name} in ...
+    fn for_stat(&mut self) {
+        let name = self.read_name();
+        if self.lex.peek() == &Token::Assign {
+            self.for_numrical(name);
+        } else {
+            todo!("generic for");
+        }
+    }
+
+    // BNF:
+    //   for Name `=` exp `,` exp [`,` exp] do block end
+    fn for_numrical(&mut self, name: String) {
+        self.lex.next();
+
+        match self.explist() {
+            2 => self.discharge(self.sp, ExpDesc::Interger(1)),
+            3 => (),
+            _ => panic!("invalid numberical for exp"),
+        }
+
+        self.locals.push(name);
+        self.locals.push(String::from(""));
+        self.locals.push(String::from(""));
+
+        self.lex.expect(Token::Do);
+
+        self.byte_codes.push(ByteCode::ForPrepare(0, 0));
+        let iprepare = self.byte_codes.len() - 1;
+        let iname = self.sp - 3;
+
+        self.push_loop_block();
+
+        assert_eq!(self.block(), Token::End);
+
+        self.locals.pop();
+        self.locals.pop();
+        self.locals.pop();
+
+        let d = self.byte_codes.len() - iprepare;
+        self.byte_codes.push(ByteCode::ForLoop(iname as u8, d as u16));
+        self.byte_codes[iprepare] = ByteCode::ForPrepare(iname as u8, d as u16);
+
+        self.pop_loop_block(self.byte_codes.len() - 1);
+    }
+
+    fn break_stat(&mut self) {
+        if let Some(breaks) = self.break_blocks.last_mut() {
+            self.byte_codes.push(ByteCode::Jump(0));
+            breaks.push(self.byte_codes.len() - 1);
+        } else {
+            panic!("break outside loop");
+        }
+    }
+
+    fn try_continue_stat(&mut self, name: &Token) -> bool {
+        if let Token::Name(name) = name {
+            if name.as_str() != "continue" {
+                return false;
+            }
+            if !matches!(self.lex.peek(), Token::End | Token::Elseif | Token::Else) {
+                return false;
+            }
+
+            if let Some(continues) = self.continue_blocks.last_mut() {
+                self.byte_codes.push(ByteCode::Jump(0));
+                continues.push((self.byte_codes.len() - 1, self.locals.len()));
+            } else {
+                panic!("continue outside loop")
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    fn push_loop_block(&mut self) {
+        self.break_blocks.push(Vec::new());
+        self.continue_blocks.push(Vec::new());
+    }
+
+    fn pop_loop_block(&mut self, icontinue: usize) {
+        // breaks
+        let iend = self.byte_codes.len() - 1;
+        for i in self.break_blocks.pop().unwrap().into_iter() {
+            self.byte_codes[i] = ByteCode::Jump((iend - i) as i16);
+        }
+
+        // continues
+        let end_nvar = self.locals.len();
+        for (i, i_nvar) in self.continue_blocks.pop().unwrap().into_iter() {
+            if i_nvar < end_nvar {
+                panic!("continue jump into local scope");
+            }
+            self.byte_codes[i] = ByteCode::Jump((icontinue as isize - i as isize) as i16 - 1);
+        }
+    }
+
+    // BNF:
+    //   do block end
+    fn do_stat(&mut self) {
+        assert_eq!(self.block(), Token::End);
+    }
+
+    // BNF:
+    //   label ::= `::` Name `::`
+    fn label_stat(&mut self) {
+        let name = self.read_name();
+        self.lex.expect(Token::DoubColon);
+
+        if self.labels.iter().any(|l| l.name == name) {
+            panic!("duplicate label {name}");
+        }
+
+        self.labels.push(GotoLabel {
+            name,
+            icode: self.byte_codes.len(),
+            nvar: self.locals.len(),
+        });
+    }
+
+    // BNF:
+    //   goto Name
+    fn goto_stat(&mut self) {
+        let name = self.read_name();
+
+        self.byte_codes.push(ByteCode::Jump(0));
+
+        self.gotos.push(GotoLabel {
+            name,
+            icode: self.byte_codes.len() - 1,
+            nvar: self.locals.len(),
+        });
+    }
+
+    fn close_goto_labels(&mut self, igoto: usize, ilabel: usize) {
+        let mut no_dsts = Vec::new();
+
+        for goto in self.gotos.drain(igoto..) {
+            if let Some(label) = self.labels.iter().rev().find(|l| l.name == goto.name) {
+                if label.icode != self.byte_codes.len() && label.nvar > goto.nvar {
+                    panic!("goto jump into scope {}", goto.name);
+                }
+                let d = (label.icode as isize - goto.icode as isize) as i16;
+                self.byte_codes[goto.icode] = ByteCode::Jump(d - 1);
+            } else {
+                no_dsts.push(goto);
+            }
+        }
+
+        self.gotos.append(&mut no_dsts);
+
+        self.labels.truncate(ilabel);
+    }
+
+    fn exp_discharge_any(&mut self) -> usize {
+        let e = self.exp();
+        self.discharge_any(e)
     }
 
     // process assignment: var = value
@@ -303,7 +599,7 @@ impl<R: Read> ParseProto<R> {
             }
 
             if !matches!(desc, ExpDesc::Interger(_) | ExpDesc::Float(_) | ExpDesc::String(_)) {
-                desc = ExpDesc::Local(self.discharge_top(desc));
+                desc = ExpDesc::Local(self.discharge_any(desc));
             }
 
             let binop = self.lex.next();
@@ -368,7 +664,7 @@ impl<R: Read> ParseProto<R> {
                     desc = match self.exp() {
                         ExpDesc::String(s) => ExpDesc::IndexField(itable, self.add_const(s)),
                         ExpDesc::Interger(i) if u8::try_from(i).is_ok() => ExpDesc::IndexInt(itable, u8::try_from(i).unwrap()),
-                        key => ExpDesc::Index(itable, self.discharge_top(key)),
+                        key => ExpDesc::Index(itable, self.discharge_any(key)),
                     };
 
                     self.lex.expect(Token::SquarR);
@@ -404,7 +700,7 @@ impl<R: Read> ParseProto<R> {
             ExpDesc::Interger(v) => ExpDesc::Interger(-v),
             ExpDesc::Float(v) => ExpDesc::Float(-v),
             ExpDesc::Nil | ExpDesc::Boolean(_) | ExpDesc::String(_) => panic!("invalid - operator"),
-            desc => ExpDesc::UnaryOp(ByteCode::Neg, self.discharge_top(desc)),
+            desc => ExpDesc::UnaryOp(ByteCode::Neg, self.discharge_any(desc)),
         }
     }
 
@@ -413,7 +709,7 @@ impl<R: Read> ParseProto<R> {
             ExpDesc::Nil => ExpDesc::Boolean(true),
             ExpDesc::Boolean(v) => ExpDesc::Boolean(!v),
             ExpDesc::Interger(_) | ExpDesc::Float(_) | ExpDesc::String(_) => ExpDesc::Boolean(false),
-            desc => ExpDesc::UnaryOp(ByteCode::Not, self.discharge_top(desc)),
+            desc => ExpDesc::UnaryOp(ByteCode::Not, self.discharge_any(desc)),
         }
     }
 
@@ -421,7 +717,7 @@ impl<R: Read> ParseProto<R> {
         match self.exp_unop() {
             ExpDesc::Interger(v) => ExpDesc::Interger(!v),
             ExpDesc::Nil | ExpDesc::Boolean(_) | ExpDesc::Float(_) | ExpDesc::String(_) => panic!("invalid ~ operator"),
-            desc => ExpDesc::UnaryOp(ByteCode::BitNot, self.discharge_top(desc)),
+            desc => ExpDesc::UnaryOp(ByteCode::BitNot, self.discharge_any(desc)),
         }
     }
 
@@ -429,7 +725,7 @@ impl<R: Read> ParseProto<R> {
         match self.exp_unop() {
             ExpDesc::String(v) => ExpDesc::Interger(v.len() as i64),
             ExpDesc::Nil | ExpDesc::Boolean(_) | ExpDesc::Interger(_) | ExpDesc::Float(_) => panic!("invalid ~ operator"),
-            desc => ExpDesc::UnaryOp(ByteCode::Len, self.discharge_top(desc)),
+            desc => ExpDesc::UnaryOp(ByteCode::Len, self.discharge_any(desc)),
         }
     }
 
@@ -464,7 +760,7 @@ impl<R: Read> ParseProto<R> {
             }
         }
 
-        let left = self.discharge_top(left);
+        let left = self.discharge_any(left);
 
         let (op, right) = match right {
             ExpDesc::Interger(v) => {
@@ -475,7 +771,7 @@ impl<R: Read> ParseProto<R> {
                 }
             }
             ExpDesc::Float(v) => (opk, self.add_const(v)),
-            _ => (opr, self.discharge_top(right)),
+            _ => (opr, self.discharge_any(right)),
         };
 
         ExpDesc::BinaryOp(op, left, right)
@@ -511,7 +807,7 @@ impl<R: Read> ParseProto<R> {
         ExpDesc::Call
     }
 
-    fn discharge_top(&mut self, desc: ExpDesc) -> usize {
+    fn discharge_any(&mut self, desc: ExpDesc) -> usize {
         self.discharge_if_need(self.sp, desc)
     }
 
@@ -564,7 +860,7 @@ impl<R: Read> ParseProto<R> {
             ExpDesc::Interger(v) => ConstStack::Const(self.add_const(v)),
             ExpDesc::Float(v) => ConstStack::Const(self.add_const(v)),
             ExpDesc::String(v) => ConstStack::Const(self.add_const(v)),
-            _ => ConstStack::Stack(self.discharge_top(desc)),
+            _ => ConstStack::Stack(self.discharge_any(desc)),
         }
     }
 
@@ -604,7 +900,7 @@ impl<R: Read> ParseProto<R> {
                         ExpDesc::Interger(v) if u8::try_from(v).is_ok() => (ByteCode::SetInt, ByteCode::SetIntConst, v as usize),
                         ExpDesc::Nil => panic!("nil can not be table key"),
                         ExpDesc::Float(v) if v.is_nan() => panic!("NaN can not be table key"),
-                        _ => (ByteCode::SetTable, ByteCode::SetTableConst, self.discharge_top(key)),
+                        _ => (ByteCode::SetTable, ByteCode::SetTableConst, self.discharge_any(key)),
                     })
                 }
                 Token::Name(_) => {

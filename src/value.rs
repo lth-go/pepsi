@@ -64,12 +64,12 @@ impl fmt::Debug for Value {
             Value::Interger(v) => write!(f, "{v}"),
             Value::Float(v) => write!(f, "{v:?}"),
             Value::ShortStr(len, buf) => {
-                write!(f, "SS: '{}'", String::from_utf8_lossy(&buf[..*len as usize]))
+                write!(f, "{}", String::from_utf8_lossy(&buf[..*len as usize]))
             }
             Value::MidStr(v) => {
-                write!(f, "MS: '{}'", String::from_utf8_lossy(&v.1[..v.0 as usize]))
+                write!(f, "{}", String::from_utf8_lossy(&v.1[..v.0 as usize]))
             }
-            Value::LongStr(v) => write!(f, "LS: '{}'", String::from_utf8_lossy(&v)),
+            Value::LongStr(v) => write!(f, "{}", String::from_utf8_lossy(&v)),
             Value::Table(v) => {
                 let v = v.borrow();
                 write!(f, "table: {}:{}", v.array.len(), v.map.len())
