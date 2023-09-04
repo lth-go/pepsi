@@ -24,10 +24,13 @@ pub enum ByteCode {
     GetTable(u8, u8, u8),      //
     GetField(u8, u8, u8),      //
     GetInt(u8, u8, u8),        //
-    
+
     // condition structures
-    Test(u8, i16),
     Jump(i16),
+    TestAndJump(u8, i16),
+    TestOrJump(u8, i16),
+    TestAndSetJump(u8, u8, u8),
+    TestOrSetJump(u8, u8, u8),
 
     // for-loop
     ForPrepare(u8, u16),
@@ -79,6 +82,27 @@ pub enum ByteCode {
     ShiftR(u8, u8, u8),
     ShiftRInt(u8, u8, u8),
     ShiftRConst(u8, u8, u8),
+
+    Equal(u8, u8, bool),
+    EqualInt(u8, u8, bool),
+    EqualConst(u8, u8, bool),
+    NotEq(u8, u8, bool),
+    NotEqInt(u8, u8, bool),
+    NotEqConst(u8, u8, bool),
+    LesEq(u8, u8, bool),
+    LesEqInt(u8, u8, bool),
+    LesEqConst(u8, u8, bool),
+    GreEq(u8, u8, bool),
+    GreEqInt(u8, u8, bool),
+    GreEqConst(u8, u8, bool),
+    Less(u8, u8, bool),
+    LessInt(u8, u8, bool),
+    LessConst(u8, u8, bool),
+    Greater(u8, u8, bool),
+    GreaterInt(u8, u8, bool),
+    GreaterConst(u8, u8, bool),
+
+    SetFalseSkip(u8),
 
     Concat(u8, u8, u8),
     ConcatInt(u8, u8, u8),

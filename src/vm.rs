@@ -124,10 +124,30 @@ impl ExeState {
                     let value = self.get_table(t, key);
                     self.set_stack(dst, value);
                 }
-                ByteCode::Test(icond, jmp) => {
-                    let cond = &self.stack[icond as usize];
-                    if matches!(cond, Value::Nil | Value::Boolean(false)) {
+                ByteCode::TestAndJump(icond, jmp) => {
+                    if (&self.stack[icond as usize]).into() {
                         pc = (pc as isize + jmp as isize) as usize;
+                    }
+                }
+                ByteCode::TestOrJump(icond, jmp) => {
+                    if (&self.stack[icond as usize]).into() {
+                    } else {
+                        pc = (pc as isize + jmp as isize) as usize;
+                    }
+                }
+                ByteCode::TestAndSetJump(dst, icond, jmp) => {
+                    let condition = &self.stack[icond as usize];
+                    if condition.into() {
+                        self.set_stack(dst, condition.clone());
+                        pc += jmp as usize;
+                    }
+                }
+                ByteCode::TestOrSetJump(dst, icond, jmp) => {
+                    let condition = &self.stack[icond as usize];
+                    if condition.into() {
+                    } else {
+                        self.set_stack(dst, condition.clone());
+                        pc += jmp as usize;
                     }
                 }
                 ByteCode::Jump(jmp) => {
@@ -370,6 +390,132 @@ impl ExeState {
                     let v = exp_binop_int_i(&self.stack[a as usize], b, |a, b| a >> b);
                     self.set_stack(dst, v)
                 }
+                ByteCode::Equal(a, b, r) => {
+                    if (&self.stack[a as usize] == &self.stack[b as usize]) == r {
+                        pc += 1;
+                    }
+                }
+                ByteCode::EqualConst(a, b, r) => {
+                    if (&self.stack[a as usize] == &proto.constants[b as usize]) == r {
+                        pc += 1;
+                    }
+                }
+                ByteCode::EqualInt(a, b, r) => {
+                    if let &Value::Interger(ii) = &self.stack[a as usize] {
+                        if (ii == b as i64) == r {
+                            pc += 1;
+                        }
+                    }
+                }
+                ByteCode::NotEq(a, b, r) => {
+                    if (&self.stack[a as usize] != &self.stack[b as usize]) == r {
+                        pc += 1;
+                    }
+                }
+                ByteCode::NotEqConst(a, b, r) => {
+                    if (&self.stack[a as usize] != &proto.constants[b as usize]) == r {
+                        pc += 1;
+                    }
+                }
+                ByteCode::NotEqInt(a, b, r) => {
+                    if let &Value::Interger(ii) = &self.stack[a as usize] {
+                        if (ii != b as i64) == r {
+                            pc += 1;
+                        }
+                    }
+                }
+                ByteCode::LesEq(a, b, r) => {
+                    let cmp = &self.stack[a as usize].partial_cmp(&self.stack[b as usize]).unwrap();
+                    if !matches!(cmp, Ordering::Greater) == r {
+                        pc += 1;
+                    }
+                }
+                ByteCode::LesEqConst(a, b, r) => {
+                    let cmp = &self.stack[a as usize].partial_cmp(&proto.constants[b as usize]).unwrap();
+                    if !matches!(cmp, Ordering::Greater) == r {
+                        pc += 1;
+                    }
+                }
+                ByteCode::LesEqInt(a, b, r) => {
+                    let a = match &self.stack[a as usize] {
+                        &Value::Interger(v) => v,
+                        &Value::Float(v) => v as i64,
+                        _ => panic!("invalid compare"),
+                    };
+                    if (a <= b as i64) == r {
+                        pc += 1;
+                    }
+                }
+                ByteCode::GreEq(a, b, r) => {
+                    let cmp = &self.stack[a as usize].partial_cmp(&self.stack[b as usize]).unwrap();
+                    if !matches!(cmp, Ordering::Less) == r {
+                        pc += 1;
+                    }
+                }
+                ByteCode::GreEqConst(a, b, r) => {
+                    let cmp = &self.stack[a as usize].partial_cmp(&proto.constants[b as usize]).unwrap();
+                    if !matches!(cmp, Ordering::Less) == r {
+                        pc += 1;
+                    }
+                }
+                ByteCode::GreEqInt(a, b, r) => {
+                    let a = match &self.stack[a as usize] {
+                        &Value::Interger(v) => v,
+                        &Value::Float(v) => v as i64,
+                        _ => panic!("invalid compare"),
+                    };
+                    if (a >= b as i64) == r {
+                        pc += 1;
+                    }
+                }
+                ByteCode::Less(a, b, r) => {
+                    let cmp = &self.stack[a as usize].partial_cmp(&self.stack[b as usize]).unwrap();
+                    if matches!(cmp, Ordering::Less) == r {
+                        pc += 1;
+                    }
+                }
+                ByteCode::LessConst(a, b, r) => {
+                    let cmp = &self.stack[a as usize].partial_cmp(&proto.constants[b as usize]).unwrap();
+                    if matches!(cmp, Ordering::Less) == r {
+                        pc += 1;
+                    }
+                }
+                ByteCode::LessInt(a, b, r) => {
+                    let a = match &self.stack[a as usize] {
+                        &Value::Interger(v) => v,
+                        &Value::Float(v) => v as i64,
+                        _ => panic!("invalid compare"),
+                    };
+                    if (a < b as i64) == r {
+                        pc += 1;
+                    }
+                }
+                ByteCode::Greater(a, b, r) => {
+                    let cmp = &self.stack[a as usize].partial_cmp(&self.stack[b as usize]).unwrap();
+                    if matches!(cmp, Ordering::Greater) == r {
+                        pc += 1;
+                    }
+                }
+                ByteCode::GreaterConst(a, b, r) => {
+                    let cmp = &self.stack[a as usize].partial_cmp(&proto.constants[b as usize]).unwrap();
+                    if matches!(cmp, Ordering::Greater) == r {
+                        pc += 1;
+                    }
+                }
+                ByteCode::GreaterInt(a, b, r) => {
+                    let a = match &self.stack[a as usize] {
+                        &Value::Interger(v) => v,
+                        &Value::Float(v) => v as i64,
+                        _ => panic!("invalid compare"),
+                    };
+                    if (a > b as i64) == r {
+                        pc += 1;
+                    }
+                }
+                ByteCode::SetFalseSkip(dst) => {
+                    self.set_stack(dst, Value::Boolean(false));
+                    pc += 1;
+                }
                 ByteCode::Concat(dst, a, b) => {
                     let v = exp_concat(&self.stack[a as usize], &self.stack[b as usize]);
                     self.set_stack(dst, v);
@@ -389,13 +535,7 @@ impl ExeState {
     }
 
     fn set_stack(&mut self, dst: u8, v: Value) {
-        let dst = dst as usize;
-
-        match dst.cmp(&self.stack.len()) {
-            Ordering::Equal => self.stack.push(v),
-            Ordering::Less => self.stack[dst] = v,
-            Ordering::Greater => panic!("fail in set_stack"),
-        }
+        set_vec(&mut self.stack, dst as usize, v);
     }
 
     fn fill_stack(&mut self, begin: usize, num: usize) {

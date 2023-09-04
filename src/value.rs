@@ -98,6 +98,27 @@ impl PartialEq for Value {
 
 impl Eq for Value {}
 
+impl PartialOrd for Value {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        match (self, other) {
+            (Value::Interger(v1), Value::Interger(v2)) => Some(v1.cmp(v2)),
+            (Value::Interger(v1), Value::Float(v2)) => (*v1 as f64).partial_cmp(v2),
+            (Value::Float(v1), Value::Interger(v2)) => v1.partial_cmp(&(*v2 as f64)),
+            (Value::Float(v1), Value::Float(v2)) => v1.partial_cmp(v2),
+            (Value::ShortStr(len1, s1), Value::ShortStr(len2, s2)) => Some(s1[..*len1 as usize].cmp(&s2[..*len2 as usize])),
+            (Value::ShortStr(len1, s1), Value::MidStr(s2)) => Some(s1[..*len1 as usize].cmp(&s2.1[..s2.0 as usize])),
+            (Value::ShortStr(len1, s1), Value::LongStr(s2)) => Some(s1[..*len1 as usize].cmp(s2)),
+            (Value::MidStr(s1), Value::ShortStr(len2, s2)) => Some(s1.1[..s1.0 as usize].cmp(&s2[..*len2 as usize])),
+            (Value::MidStr(s1), Value::MidStr(s2)) => Some(s1.1[..s1.0 as usize].cmp(&s2.1[..s2.0 as usize])),
+            (Value::MidStr(s1), Value::LongStr(s2)) => Some(s1.1[..s1.0 as usize].cmp(s2)),
+            (Value::LongStr(s1), Value::ShortStr(len2, s2)) => Some(s1.as_ref().as_slice().cmp(&s2[..*len2 as usize])),
+            (Value::LongStr(s1), Value::MidStr(s2)) => Some(s1.as_ref().as_slice().cmp(&s2.1[..s2.0 as usize])),
+            (Value::LongStr(s1), Value::LongStr(s2)) => Some(s1.cmp(s2)),
+            (_, _) => None,
+        }
+    }
+}
+
 impl Hash for Value {
     fn hash<H: Hasher>(&self, state: &mut H) {
         match self {
@@ -203,5 +224,11 @@ impl<'a> From<&'a Value> for &'a str {
 impl From<&Value> for String {
     fn from(value: &Value) -> Self {
         String::from_utf8_lossy(value.into()).to_string()
+    }
+}
+
+impl From<&Value> for bool {
+    fn from(value: &Value) -> Self {
+        !matches!(value, Value::Nil | Value::Boolean(false))
     }
 }
