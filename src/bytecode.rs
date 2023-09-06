@@ -24,6 +24,7 @@ pub enum ByteCode {
     GetTable(u8, u8, u8),      //
     GetField(u8, u8, u8),      //
     GetInt(u8, u8, u8),        //
+    GetFieldSelf(u8, u8, u8),
 
     // condition structures
     Jump(i16),
@@ -37,7 +38,12 @@ pub enum ByteCode {
     ForLoop(u8, u16),
 
     // function call
-    Call(u8, u8), //
+    Call(u8, u8, u8), //
+    CallSet(u8, u8, u8),
+    TailCall(u8, u8),
+    Return0,
+    Return(u8, u8),
+    VarArgs(u8, u8),
 
     // unips
     Neg(u8, u8), //

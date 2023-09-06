@@ -5,6 +5,7 @@ use std::hash::{Hash, Hasher};
 use std::mem;
 use std::rc::Rc;
 
+use crate::parse::FuncProto;
 use crate::utils::ftoi;
 use crate::vm::ExeState;
 
@@ -21,7 +22,8 @@ pub enum Value {
     MidStr(Rc<(u8, [u8; MID_STR_MAX])>),
     LongStr(Rc<Vec<u8>>),
     Table(Rc<RefCell<Table>>),
-    Function(fn(&mut ExeState) -> i32),
+    RustFunction(fn(&mut ExeState) -> i32),
+    LuaFunction(Rc<FuncProto>),
 }
 
 pub struct Table {
@@ -45,13 +47,12 @@ impl fmt::Display for Value {
             Value::Boolean(v) => write!(f, "{v}"),
             Value::Interger(v) => write!(f, "{v}"),
             Value::Float(v) => write!(f, "{v:?}"),
-            Value::ShortStr(len, buf) => {
-                write!(f, "{}", String::from_utf8_lossy(&buf[..*len as usize]))
-            }
+            Value::ShortStr(len, buf) => write!(f, "{}", String::from_utf8_lossy(&buf[..*len as usize])),
             Value::MidStr(v) => write!(f, "{}", String::from_utf8_lossy(&v.1[..v.0 as usize])),
             Value::LongStr(v) => write!(f, "{}", String::from_utf8_lossy(&v)),
             Value::Table(v) => write!(f, "table: {:?}", Rc::as_ptr(v)),
-            Value::Function(_) => write!(f, "function"),
+            Value::RustFunction(_) => write!(f, "function"),
+            Value::LuaFunction(v) => write!(f, "function: {:?}", Rc::as_ptr(v)),
         }
     }
 }
@@ -63,18 +64,15 @@ impl fmt::Debug for Value {
             Value::Boolean(v) => write!(f, "{v}"),
             Value::Interger(v) => write!(f, "{v}"),
             Value::Float(v) => write!(f, "{v:?}"),
-            Value::ShortStr(len, buf) => {
-                write!(f, "{}", String::from_utf8_lossy(&buf[..*len as usize]))
-            }
-            Value::MidStr(v) => {
-                write!(f, "{}", String::from_utf8_lossy(&v.1[..v.0 as usize]))
-            }
+            Value::ShortStr(len, buf) => write!(f, "{}", String::from_utf8_lossy(&buf[..*len as usize])),
+            Value::MidStr(v) => write!(f, "{}", String::from_utf8_lossy(&v.1[..v.0 as usize])),
             Value::LongStr(v) => write!(f, "{}", String::from_utf8_lossy(&v)),
             Value::Table(v) => {
                 let v = v.borrow();
                 write!(f, "table: {}:{}", v.array.len(), v.map.len())
             }
-            Value::Function(_) => write!(f, "function"),
+            Value::RustFunction(_) => write!(f, "function"),
+            Value::LuaFunction(_) => write!(f, "Lua function",),
         }
     }
 }
@@ -90,7 +88,8 @@ impl PartialEq for Value {
             (Value::MidStr(s1), Value::MidStr(s2)) => s1.1[..s1.0 as usize] == s2.1[..s2.0 as usize],
             (Value::LongStr(s1), Value::LongStr(s2)) => s1 == s2,
             (Value::Table(v1), Value::Table(v2)) => Rc::ptr_eq(v1, v2),
-            (Value::Function(v1), Value::Function(v2)) => std::ptr::eq(v1, v2),
+            (Value::RustFunction(v1), Value::RustFunction(v2)) => std::ptr::eq(v1, v2),
+            (Value::LuaFunction(v1), Value::LuaFunction(v2)) => Rc::as_ptr(v1) == Rc::as_ptr(v2),
             (_, _) => false,
         }
     }
@@ -119,24 +118,46 @@ impl PartialOrd for Value {
     }
 }
 
+impl Value {
+    pub fn same(&self, other: &Self) -> bool {
+        mem::discriminant(self) == mem::discriminant(other) && self == other
+    }
+
+    pub fn ty(&self) -> &'static str {
+        match self {
+            &Value::Nil => "nil",
+            &Value::Boolean(_) => "bool",
+            &Value::Interger(_) => "number",
+            &Value::Float(_) => "number",
+            &Value::ShortStr(_, _) => "string",
+            &Value::MidStr(_) => "string",
+            &Value::LongStr(_) => "string",
+            &Value::Table(_) => "table",
+            &Value::RustFunction(_) => "function",
+            &Value::LuaFunction(_) => "function",
+        }
+    }
+}
+
 impl Hash for Value {
     fn hash<H: Hasher>(&self, state: &mut H) {
         match self {
             Self::Nil => (),
             Self::Boolean(v) => v.hash(state),
             Value::Interger(v) => v.hash(state),
-            Value::Float(v) => {
-                if let Some(i) = ftoi(*v) {
-                    i.hash(state)
+            &Value::Float(v) => {
+                if let Some(v) = ftoi(v) {
+                    v.hash(state)
                 } else {
-                    unsafe { mem::transmute::<f64, i64>(*v).hash(state) }
+                    (v.to_bits() as i64).hash(state)
                 }
             }
             Value::ShortStr(len, buf) => buf[..*len as usize].hash(state),
             Value::MidStr(v) => v.1[..v.0 as usize].hash(state),
             Value::LongStr(v) => v.hash(state),
             Value::Table(v) => Rc::as_ptr(v).hash(state),
-            Value::Function(v) => (*v as *const usize).hash(state),
+            Value::RustFunction(v) => (*v as *const usize).hash(state),
+            Value::LuaFunction(v) => Rc::as_ptr(v).hash(state),
         }
     }
 }
