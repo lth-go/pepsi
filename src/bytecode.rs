@@ -1,16 +1,16 @@
 #[derive(Debug)]
 pub enum ByteCode {
-    // global variable
-    GetGlobal(u8, u8),      //
-    SetGlobal(u8, u8),      //
-    SetGlobalConst(u8, u8), // set global from const
-
     // local variable
     LoadConst(u8, u16), //
     LoadNil(u8, u8),    //
     LoadBool(u8, bool), //
     LoadInt(u8, i16),   //
     Move(u8, u8),       // cp stack value
+
+    GetUpvalue(u8, u8),
+    SetUpvalue(u8, u8),
+    SetUpvalueConst(u8, u8),
+    Close(u8),
 
     // table
     NewTable(u8, u8, u8),      //
@@ -26,6 +26,10 @@ pub enum ByteCode {
     GetInt(u8, u8, u8),        //
     GetFieldSelf(u8, u8, u8),
 
+    SetUpField(u8, u8, u8),
+    SetUpFidldConst(u8, u8, u8),
+    GetUpField(u8, u8, u8),
+
     // condition structures
     Jump(i16),
     TestAndJump(u8, i16),
@@ -36,8 +40,10 @@ pub enum ByteCode {
     // for-loop
     ForPrepare(u8, u16),
     ForLoop(u8, u16),
+    ForCallLoop(u8, u8, u8),
 
     // function call
+    Closure(u8,u16),
     Call(u8, u8, u8), //
     CallSet(u8, u8, u8),
     TailCall(u8, u8),

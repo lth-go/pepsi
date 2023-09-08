@@ -1,12 +1,11 @@
 use std::cell::RefCell;
 use std::cmp::Ordering;
-use std::collections::HashMap;
 use std::io::Write;
 use std::rc::Rc;
 
 use crate::bytecode::ByteCode;
-use crate::parse::FuncProto;
-use crate::utils::ftoi;
+use crate::parse::{FuncProto, UpIndex};
+use crate::utils::{ftoi, set_vec};
 use crate::value::{Table, Value};
 
 fn lib_print(state: &mut ExeState) -> i32 {
@@ -26,22 +25,112 @@ fn lib_type(state: &mut ExeState) -> i32 {
     1
 }
 
+fn test_new_counter(state: &mut ExeState) -> i32 {
+    let mut i: i32 = 0;
+
+    let c = move |_: &mut ExeState| {
+        i += 1;
+        println!("counter: {i}");
+        0
+    };
+
+    state.push(Value::RustClosure(Rc::new(RefCell::new(Box::new(c)))));
+    1
+}
+
+fn ipairs_aux(state: &mut ExeState) -> i32 {
+    let table = match state.get::<&Value>(1) {
+        Value::Table(t) => t.borrow(),
+        _ => panic!("ipairs non-table"),
+    };
+
+    let i: i64 = state.get(2);
+    if i < 0 || i as usize >= table.array.len() {
+        return 0;
+    }
+
+    let v = table.array[i as usize].clone();
+    drop(table);
+
+    state.push(i + 1);
+    state.push(v);
+    2
+}
+
+fn ipairs(state: &mut ExeState) -> i32 {
+    state.push(Value::RustFunction(ipairs_aux));
+    state.push(state.get::<&Value>(1).clone());
+    state.push(0);
+    3
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Upvalue {
+    Open(usize),
+    Closed(Value),
+}
+
+impl Upvalue {
+    fn get<'a>(&'a self, stack: &'a Vec<Value>) -> &'a Value {
+        match self {
+            Upvalue::Open(v) => &stack[*v],
+            Upvalue::Closed(v) => &v,
+        }
+    }
+
+    fn set(&mut self, stack: &mut Vec<Value>, value: Value) {
+        match self {
+            Upvalue::Open(v) => stack[*v] = value,
+            Upvalue::Closed(v) => *v = value,
+        }
+    }
+}
+
+struct OpenBroker {
+    ilocal: usize,
+    broker: Rc<RefCell<Upvalue>>,
+}
+
+impl From<usize> for OpenBroker {
+    fn from(value: usize) -> Self {
+        OpenBroker {
+            ilocal: value,
+            broker: Rc::new(RefCell::new(Upvalue::Open(value))),
+        }
+    }
+}
+
+pub struct LuaClosure {
+    proto: Rc<FuncProto>,
+    upvalues: Vec<Rc<RefCell<Upvalue>>>,
+}
+
 pub struct ExeState {
-    globals: HashMap<String, Value>,
     stack: Vec<Value>,
     base: usize,
 }
 
 impl ExeState {
     pub fn new() -> Self {
-        let mut globals = HashMap::new();
-        globals.insert(String::from("print"), Value::RustFunction(lib_print));
-        globals.insert(String::from("type"), Value::RustFunction(lib_type));
+        let mut env = Table::new(0, 0);
+        env.map.insert("print".into(), Value::RustFunction(lib_print));
+        env.map.insert("type".into(), Value::RustFunction(lib_type));
+        env.map.insert("ipairs".into(), Value::RustFunction(ipairs));
+        env.map.insert("new_counter".into(), Value::RustFunction(test_new_counter));
 
-        Self { globals, stack: Vec::new(), base: 1 }
+        Self {
+            stack: vec![Value::Nil, Value::Table(Rc::new(RefCell::new(env)))],
+            base: 1,
+        }
     }
 
-    pub fn execute(&mut self, proto: &FuncProto) -> usize {
+    pub fn execute(&mut self, proto: &FuncProto, upvalues: &Vec<Rc<RefCell<Upvalue>>>) -> usize {
+        let mut open_brokers: Vec<OpenBroker> = Vec::new();
+
+        if self.stack.len() - self.base < proto.nparam {
+            self.fill_stack_nil(0, proto.nparam)
+        }
+
         let varargs = if proto.has_varargs { self.stack.drain(self.base + proto.nparam..).collect() } else { Vec::new() };
 
         let mut pc = 0;
@@ -49,27 +138,33 @@ impl ExeState {
         loop {
             println!("  [{pc}]\t{:?}", proto.byte_codes[pc]);
             match proto.byte_codes[pc] {
-                ByteCode::GetGlobal(dst, name) => {
-                    let name: &str = (&proto.constants[name as usize]).into();
-                    let v = self.globals.get(name).unwrap_or(&Value::Nil).clone();
+                ByteCode::GetUpvalue(dst, src) => {
+                    let v = upvalues[src as usize].borrow().get(&self.stack).clone();
                     self.set_stack(dst, v);
                 }
-                ByteCode::SetGlobal(name, src) => {
-                    let name = &proto.constants[name as usize];
-                    let value = self.get_stack(src).clone();
-                    self.globals.insert(name.into(), value);
+                ByteCode::SetUpvalue(dst, src) => {
+                    let v = self.get_stack(src).clone();
+                    upvalues[dst as usize].borrow_mut().set(&mut self.stack, v);
                 }
-                ByteCode::SetGlobalConst(name, src) => {
-                    let name = &proto.constants[name as usize];
-                    let value = proto.constants[src as usize].clone();
-                    self.globals.insert(name.into(), value);
+                ByteCode::SetUpvalueConst(dst, src) => {
+                    let v = proto.constants[src as usize].clone();
+                    upvalues[dst as usize].borrow_mut().set(&mut self.stack, v);
+                }
+                ByteCode::Close(ilocal) => {
+                    let ilocal = self.base + ilocal as usize;
+                    let from = open_brokers.binary_search_by_key(&ilocal, |b| b.ilocal).unwrap_or_else(|i| i);
+                    self.close_brokers(open_brokers.drain(from..));
                 }
                 ByteCode::LoadConst(dst, c) => {
                     let v = proto.constants[c as usize].clone();
                     self.set_stack(dst, v);
                 }
                 ByteCode::LoadNil(dst, n) => {
-                    self.fill_stack(dst as usize, n as usize);
+                    let begin = self.base + dst as usize;
+                    if begin < self.stack.len() {
+                        self.stack[begin..].fill(Value::Nil);
+                    }
+                    self.fill_stack_nil(dst, n as usize);
                 }
                 ByteCode::LoadBool(dst, b) => {
                     self.set_stack(dst, Value::Boolean(b));
@@ -87,31 +182,31 @@ impl ExeState {
                 }
                 ByteCode::SetInt(t, i, v) => {
                     let value = self.get_stack(v).clone();
-                    self.set_table_int(t, i as i64, value);
+                    self.get_stack(t).new_index_array(i as i64, value);
                 }
                 ByteCode::SetIntConst(t, i, v) => {
                     let value = proto.constants[v as usize].clone();
-                    self.set_table_int(t, i as i64, value);
+                    self.get_stack(t).new_index_array(i as i64, value);
                 }
                 ByteCode::SetField(t, k, v) => {
                     let key = proto.constants[k as usize].clone();
                     let value = self.get_stack(v).clone();
-                    self.set_table(t, key, value);
+                    self.get_stack(t).new_index(key, value);
                 }
                 ByteCode::SetFieldConst(t, k, v) => {
                     let key = proto.constants[k as usize].clone();
                     let value = proto.constants[v as usize].clone();
-                    self.set_table(t, key, value);
+                    self.get_stack(t).new_index(key, value);
                 }
                 ByteCode::SetTable(t, k, v) => {
                     let key = self.get_stack(k).clone();
                     let value = self.get_stack(v).clone();
-                    self.set_table(t, key, value);
+                    self.get_stack(t).new_index(key, value);
                 }
                 ByteCode::SetTableConst(t, k, v) => {
                     let key = self.get_stack(k).clone();
                     let value = proto.constants[v as usize].clone();
-                    self.set_table(t, key, value);
+                    self.get_stack(t).new_index(key, value);
                 }
                 ByteCode::SetList(table, n) => {
                     let ivalue = self.base + table as usize + 1;
@@ -124,24 +219,39 @@ impl ExeState {
                     }
                 }
                 ByteCode::GetInt(dst, t, k) => {
-                    let value = self.get_table_int(t, k as i64);
+                    let value = self.get_stack(t).index_array(k as i64);
                     self.set_stack(dst, value);
                 }
                 ByteCode::GetField(dst, t, k) => {
                     let key = &proto.constants[k as usize];
-                    let value = self.get_table(t, key);
+                    let value = self.get_stack(t).index(key);
                     self.set_stack(dst, value);
                 }
                 ByteCode::GetFieldSelf(dst, t, k) => {
                     let table = self.get_stack(t).clone();
                     let key = &proto.constants[k as usize];
-                    let value = self.get_table(t, key);
+                    let value = table.index(key).clone();
                     self.set_stack(dst, value);
                     self.set_stack(dst + 1, table);
                 }
                 ByteCode::GetTable(dst, t, k) => {
                     let key = self.get_stack(k);
-                    let value = self.get_table(t, key);
+                    let value = self.get_stack(t).index(key);
+                    self.set_stack(dst, value);
+                }
+                ByteCode::SetUpField(t, k, v) => {
+                    let key = proto.constants[k as usize].clone();
+                    let value = self.get_stack(v).clone();
+                    upvalues[t as usize].borrow().get(&self.stack).new_index(key, value);
+                }
+                ByteCode::SetUpFidldConst(t, k, v) => {
+                    let key = proto.constants[k as usize].clone();
+                    let value = proto.constants[v as usize].clone();
+                    upvalues[t as usize].borrow().get(&self.stack).new_index(key, value);
+                }
+                ByteCode::GetUpField(dst, t, k) => {
+                    let key = &proto.constants[k as usize];
+                    let value = upvalues[t as usize].borrow().get(&self.stack).index(key).clone();
                     self.set_stack(dst, value);
                 }
                 ByteCode::TestAndJump(icond, jmp) => {
@@ -224,6 +334,50 @@ impl ExeState {
                     }
                     _ => panic!("todo"),
                 },
+                ByteCode::ForCallLoop(iter, nvar, jmp) => {
+                    let nret = self.call_function(iter, 2 + 1);
+                    let iret = self.stack.len() - nret;
+
+                    if nret > 0 && self.stack[iret] != Value::Nil {
+                        let first_ret = self.stack[iret].clone();
+                        self.set_stack(iter + 2, first_ret);
+
+                        self.stack.drain(self.base + iter as usize + 3..iret);
+                        self.fill_stack_nil(iter + 3, nvar as usize);
+
+                        pc -= jmp as usize;
+                    } else if jmp == 0 {
+                        pc += 1;
+                    }
+                }
+                ByteCode::Closure(dst, inner) => {
+                    let Value::LuaFunction(inner_proto) = proto.constants[inner as usize].clone() else {
+                        panic!("must be funcProto");
+                    };
+
+                    let inner_upvalues = inner_proto
+                        .upindexes
+                        .iter()
+                        .map(|up| match up {
+                            &UpIndex::Upvalue(iup) => upvalues[iup].clone(),
+                            &UpIndex::Local(ilocal) => {
+                                let ilocal = self.base + ilocal;
+                                let iob = open_brokers.binary_search_by_key(&ilocal, |b| b.ilocal).unwrap_or_else(|i| {
+                                    open_brokers.insert(i, OpenBroker::from(ilocal));
+                                    i
+                                });
+                                open_brokers[iob].broker.clone()
+                            }
+                        })
+                        .collect();
+
+                    let c = LuaClosure {
+                        upvalues: inner_upvalues,
+                        proto: inner_proto,
+                    };
+
+                    self.set_stack(dst, Value::LuaClosure(Rc::new(c)))
+                }
                 ByteCode::Call(func, narg_plus, want_nret) => {
                     let nret = self.call_function(func, narg_plus);
 
@@ -233,7 +387,7 @@ impl ExeState {
 
                     let want_nret = want_nret as usize;
                     if nret < want_nret {
-                        self.fill_stack(nret, want_nret - nret)
+                        self.fill_stack_nil(func, want_nret - nret)
                     }
                 }
                 ByteCode::CallSet(dst, func, narg_plus) => {
@@ -249,11 +403,15 @@ impl ExeState {
                     self.stack.truncate(self.base + func as usize + 1);
                 }
                 ByteCode::TailCall(func, narg_plus) => {
+                    self.close_brokers(open_brokers);
+
                     self.stack.drain(self.base - 1..self.base + func as usize);
 
                     return self.do_call_function(narg_plus);
                 }
                 ByteCode::Return(iret, nret) => {
+                    self.close_brokers(open_brokers);
+
                     let iret = self.base + iret as usize;
                     if nret == 0 {
                         return self.stack.len() - iret;
@@ -263,6 +421,7 @@ impl ExeState {
                     }
                 }
                 ByteCode::Return0 => {
+                    self.close_brokers(open_brokers);
                     return 0;
                 }
                 ByteCode::VarArgs(dst, want) => {
@@ -274,7 +433,7 @@ impl ExeState {
                         self.stack.extend_from_slice(&varargs);
                     } else if want > len {
                         self.stack.extend_from_slice(&varargs);
-                        self.fill_stack(dst as usize + len, want - len);
+                        self.fill_stack_nil(dst, want);
                     } else {
                         self.stack.extend_from_slice(&varargs[..want]);
                     }
@@ -608,70 +767,62 @@ impl ExeState {
         set_vec(&mut self.stack, self.base + dst as usize, v);
     }
 
-    fn fill_stack(&mut self, begin: usize, num: usize) {
-        let begin = self.base + begin;
-        let end = begin + num;
-        let len = self.stack.len();
-        if begin < len {
-            self.stack[begin..len].fill(Value::Nil);
-        }
-        if end > len {
-            self.stack.resize(end, Value::Nil);
-        }
+    fn fill_stack_nil(&mut self, base: u8, to: usize) {
+        self.stack.resize(self.base + base as usize + to, Value::Nil);
     }
 
-    fn set_table(&mut self, t: u8, key: Value, value: Value) {
-        match &key {
-            Value::Interger(v) => self.set_table_int(t, *v, value),
-            _ => self.do_set_table(t, key, value),
-        }
-    }
+    // fn set_table(&mut self, t: u8, key: Value, value: Value) {
+    //     match &key {
+    //         Value::Interger(v) => self.set_table_int(t, *v, value),
+    //         _ => self.do_set_table(t, key, value),
+    //     }
+    // }
 
-    fn set_table_int(&mut self, t: u8, i: i64, value: Value) {
-        if let Value::Table(table) = self.get_stack(t) {
-            let mut table = table.borrow_mut();
-            if i > 0 && (i < 4 || i < table.array.capacity() as i64 * 2) {
-                set_vec(&mut table.array, i as usize - 1, value);
-            } else {
-                table.map.insert(Value::Interger(i), value);
-            }
-        } else {
-            panic!("invalid table")
-        }
-    }
+    // fn set_table_int(&mut self, t: u8, i: i64, value: Value) {
+    //     if let Value::Table(table) = self.get_stack(t) {
+    //         let mut table = table.borrow_mut();
+    //         if i > 0 && (i < 4 || i < table.array.capacity() as i64 * 2) {
+    //             set_vec(&mut table.array, i as usize - 1, value);
+    //         } else {
+    //             table.map.insert(Value::Interger(i), value);
+    //         }
+    //     } else {
+    //         panic!("invalid table")
+    //     }
+    // }
 
-    fn do_set_table(&mut self, t: u8, key: Value, value: Value) {
-        if let Value::Table(table) = self.get_stack(t) {
-            table.borrow_mut().map.insert(key, value);
-        } else {
-            panic!("invalid table");
-        }
-    }
+    // fn do_set_table(&mut self, t: u8, key: Value, value: Value) {
+    //     if let Value::Table(table) = self.get_stack(t) {
+    //         table.borrow_mut().map.insert(key, value);
+    //     } else {
+    //         panic!("invalid table");
+    //     }
+    // }
 
-    fn get_table(&self, t: u8, key: &Value) -> Value {
-        match key {
-            Value::Interger(i) => self.get_table_int(t, *i),
-            _ => self.do_get_table(t, key),
-        }
-    }
+    // fn get_table(&self, t: u8, key: &Value) -> Value {
+    //     match key {
+    //         Value::Interger(i) => self.get_table_int(t, *i),
+    //         _ => self.do_get_table(t, key),
+    //     }
+    // }
 
-    fn get_table_int(&self, t: u8, i: i64) -> Value {
-        if let Value::Table(table) = self.get_stack(t) {
-            let table = table.borrow();
-            table.array.get(i as usize - 1).unwrap_or_else(|| table.map.get(&Value::Interger(i)).unwrap_or(&Value::Nil)).clone()
-        } else {
-            panic!("set invalid table");
-        }
-    }
+    // fn get_table_int(&self, t: u8, i: i64) -> Value {
+    //     if let Value::Table(table) = self.get_stack(t) {
+    //         let table = table.borrow();
+    //         table.array.get(i as usize - 1).unwrap_or_else(|| table.map.get(&Value::Interger(i)).unwrap_or(&Value::Nil)).clone()
+    //     } else {
+    //         panic!("set invalid table");
+    //     }
+    // }
 
-    fn do_get_table(&self, t: u8, key: &Value) -> Value {
-        if let Value::Table(table) = self.get_stack(t) {
-            let table = table.borrow();
-            table.map.get(key).unwrap_or(&Value::Nil).clone()
-        } else {
-            panic!("set invalid table")
-        }
-    }
+    // fn do_get_table(&self, t: u8, key: &Value) -> Value {
+    //     if let Value::Table(table) = self.get_stack(t) {
+    //         let table = table.borrow();
+    //         table.map.get(key).unwrap_or(&Value::Nil).clone()
+    //     } else {
+    //         panic!("set invalid table")
+    //     }
+    // }
 
     fn call_function(&mut self, func: u8, narg_plus: u8) -> usize {
         self.base += func as usize + 1;
@@ -681,33 +832,30 @@ impl ExeState {
     }
 
     fn do_call_function(&mut self, narg_plus: u8) -> usize {
+        if narg_plus != 0 {
+            self.stack.truncate(self.base + narg_plus as usize - 1);
+        }
+
         match self.stack[self.base - 1].clone() {
-            Value::RustFunction(f) => {
-                if narg_plus != 0 {
-                    self.stack.truncate(self.base + narg_plus as usize - 1);
-                }
-
-                f(self) as usize
-            }
-            Value::LuaFunction(f) => {
-                let narg = if narg_plus == 0 { self.stack.len() - self.base } else { narg_plus as usize - 1 };
-
-                if narg < f.nparam {
-                    self.fill_stack(narg, f.nparam - narg);
-                } else if f.has_varargs && narg_plus != 0 {
-                    self.stack.truncate(self.base + narg);
-                }
-
-                self.execute(&f)
-            }
+            Value::RustFunction(f) => f(self) as usize,
+            Value::RustClosure(f) => f.borrow_mut()(self) as usize,
+            Value::LuaFunction(f) => self.execute(&f, &Vec::new()),
+            Value::LuaClosure(f) => self.execute(&f.proto, &f.upvalues),
             v => panic!("invalid function: {v:?}"),
         }
     }
 
+    fn close_brokers(&self, open_brokers: impl IntoIterator<Item = OpenBroker>) {
+        for OpenBroker { ilocal, broker } in open_brokers {
+            let openi = broker.replace(Upvalue::Closed(self.stack[ilocal].clone()));
+            debug_assert_eq!(openi, Upvalue::Open(ilocal));
+        }
+    }
+
     fn make_float(&mut self, dst: u8) -> f64 {
-        match self.stack[dst as usize] {
-            Value::Float(v) => v,
-            Value::Interger(i) => {
+        match self.get_stack(dst) {
+            &Value::Float(v) => v,
+            &Value::Interger(i) => {
                 let f = i as f64;
                 self.set_stack(dst, Value::Float(f));
                 f
@@ -717,7 +865,7 @@ impl ExeState {
     }
 
     fn read_int(&self, dst: u8) -> i64 {
-        if let Value::Interger(i) = self.stack[dst as usize] {
+        if let &Value::Interger(i) = self.get_stack(dst) {
             i
         } else {
             panic!("invalid interger");
@@ -725,7 +873,7 @@ impl ExeState {
     }
 
     fn read_float(&self, dst: u8) -> f64 {
-        if let Value::Float(f) = self.stack[dst as usize] {
+        if let &Value::Float(f) = self.get_stack(dst) {
             f
         } else {
             panic!("invalid float");
@@ -747,17 +895,6 @@ impl<'a> ExeState {
 
     pub fn push(&mut self, v: impl Into<Value>) {
         self.stack.push(v.into())
-    }
-}
-
-fn set_vec(vec: &mut Vec<Value>, i: usize, value: Value) {
-    match i.cmp(&vec.len()) {
-        Ordering::Less => vec[i] = value,
-        Ordering::Equal => vec.push(value),
-        Ordering::Greater => {
-            vec.resize(i, Value::Nil);
-            vec.push(value);
-        }
     }
 }
 

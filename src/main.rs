@@ -16,5 +16,5 @@ fn main() {
 
     let file = File::open(&args[1]).unwrap();
     let proto = parse::load(BufReader::new(file));
-    vm::ExeState::new().execute(&proto);
+    vm::ExeState::new().execute(&proto, &Vec::new());
 }

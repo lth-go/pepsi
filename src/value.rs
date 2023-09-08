@@ -6,8 +6,8 @@ use std::mem;
 use std::rc::Rc;
 
 use crate::parse::FuncProto;
-use crate::utils::ftoi;
-use crate::vm::ExeState;
+use crate::utils::{ftoi, set_vec};
+use crate::vm::{ExeState, LuaClosure};
 
 const SHORT_STR_MAX: usize = 14; // sizeof(Value) - 1(tag) - 1(len)
 const MID_STR_MAX: usize = 48 - 1;
@@ -23,7 +23,9 @@ pub enum Value {
     LongStr(Rc<Vec<u8>>),
     Table(Rc<RefCell<Table>>),
     RustFunction(fn(&mut ExeState) -> i32),
+    RustClosure(Rc<RefCell<Box<dyn FnMut(&mut ExeState) -> i32>>>),
     LuaFunction(Rc<FuncProto>),
+    LuaClosure(Rc<LuaClosure>),
 }
 
 pub struct Table {
@@ -36,6 +38,34 @@ impl Table {
         Self {
             array: Vec::with_capacity(narray),
             map: HashMap::with_capacity(nmap),
+        }
+    }
+
+    pub fn index(&self, key: &Value) -> &Value {
+        match key {
+            &Value::Interger(v) => self.index_array(v),
+            _ => self.map.get(key).unwrap_or(&Value::Nil),
+        }
+    }
+
+    pub fn index_array(&self, v: i64) -> &Value {
+        self.array.get(v as usize - 1).unwrap_or_else(|| self.map.get(&Value::Interger(v as i64)).unwrap_or(&Value::Nil))
+    }
+
+    pub fn new_index(&mut self, key: Value, value: Value) {
+        match key {
+            Value::Interger(v) => self.new_index_array(v, value),
+            _ => {
+                self.map.insert(key, value);
+            }
+        }
+    }
+
+    pub fn new_index_array(&mut self, v: i64, value: Value) {
+        if v > 0 && (v < 4 || v < self.array.capacity() as i64 * 2) {
+            set_vec(&mut self.array, v as usize - 1, value);
+        } else {
+            self.map.insert(Value::Interger(v), value);
         }
     }
 }
@@ -52,7 +82,9 @@ impl fmt::Display for Value {
             Value::LongStr(v) => write!(f, "{}", String::from_utf8_lossy(&v)),
             Value::Table(v) => write!(f, "table: {:?}", Rc::as_ptr(v)),
             Value::RustFunction(_) => write!(f, "function"),
+            Value::RustClosure(_) => write!(f, "function"),
             Value::LuaFunction(v) => write!(f, "function: {:?}", Rc::as_ptr(v)),
+            Value::LuaClosure(v) => write!(f, "function: {:?}", Rc::as_ptr(v)),
         }
     }
 }
@@ -71,8 +103,10 @@ impl fmt::Debug for Value {
                 let v = v.borrow();
                 write!(f, "table: {}:{}", v.array.len(), v.map.len())
             }
-            Value::RustFunction(_) => write!(f, "function"),
+            Value::RustFunction(_) => write!(f, "rust function"),
+            Value::RustClosure(_) => write!(f, "rust closure"),
             Value::LuaFunction(_) => write!(f, "Lua function",),
+            Value::LuaClosure(_) => write!(f, "Lua closure",),
         }
     }
 }
@@ -84,12 +118,15 @@ impl PartialEq for Value {
             (Value::Boolean(v1), Value::Boolean(v2)) => *v1 == *v2,
             (Value::Interger(v1), Value::Interger(v2)) => *v1 == *v2,
             (Value::Float(v1), Value::Float(v2)) => *v1 == *v2,
+            (Value::Interger(v1), Value::Float(v2)) | (Value::Float(v2), Value::Interger(v1)) => *v1 as f64 == *v2 && *v1 == *v2 as i64,
             (Value::ShortStr(len1, s1), Value::ShortStr(len2, s2)) => s1[..*len1 as usize] == s2[..*len2 as usize],
             (Value::MidStr(s1), Value::MidStr(s2)) => s1.1[..s1.0 as usize] == s2.1[..s2.0 as usize],
             (Value::LongStr(s1), Value::LongStr(s2)) => s1 == s2,
             (Value::Table(v1), Value::Table(v2)) => Rc::ptr_eq(v1, v2),
             (Value::RustFunction(v1), Value::RustFunction(v2)) => std::ptr::eq(v1, v2),
+            (Value::RustClosure(v1), Value::RustClosure(v2)) => Rc::as_ptr(v1) == Rc::as_ptr(v2),
             (Value::LuaFunction(v1), Value::LuaFunction(v2)) => Rc::as_ptr(v1) == Rc::as_ptr(v2),
+            (Value::LuaClosure(v1), Value::LuaClosure(v2)) => Rc::as_ptr(v1) == Rc::as_ptr(v2),
             (_, _) => false,
         }
     }
@@ -134,7 +171,37 @@ impl Value {
             &Value::LongStr(_) => "string",
             &Value::Table(_) => "table",
             &Value::RustFunction(_) => "function",
+            &Value::RustClosure(_) => "function",
             &Value::LuaFunction(_) => "function",
+            &Value::LuaClosure(_) => "function",
+        }
+    }
+
+    pub fn index(&self, key: &Value) -> Value {
+        match self {
+            Value::Table(v) => v.borrow().index(key).clone(),
+            _ => todo!("meta __index"),
+        }
+    }
+
+    pub fn index_array(&self, i: i64) -> Value {
+        match self {
+            Value::Table(v) => v.borrow().index_array(i).clone(),
+            _ => todo!("meta __index"),
+        }
+    }
+
+    pub fn new_index(&self, key: Value, value: Value) {
+        match self {
+            Value::Table(v) => v.borrow_mut().new_index(key, value),
+            _ => todo!("meta __index"),
+        }
+    }
+
+    pub fn new_index_array(&self, i: i64, value: Value) {
+        match self {
+            Value::Table(v) => v.borrow_mut().new_index_array(i, value),
+            _ => todo!("meta __index"),
         }
     }
 }
@@ -157,7 +224,9 @@ impl Hash for Value {
             Value::LongStr(v) => v.hash(state),
             Value::Table(v) => Rc::as_ptr(v).hash(state),
             Value::RustFunction(v) => (*v as *const usize).hash(state),
+            Value::RustClosure(v) => Rc::as_ptr(v).hash(state),
             Value::LuaFunction(v) => Rc::as_ptr(v).hash(state),
+            Value::LuaClosure(v) => Rc::as_ptr(v).hash(state),
         }
     }
 }
@@ -251,5 +320,18 @@ impl From<&Value> for String {
 impl From<&Value> for bool {
     fn from(value: &Value) -> Self {
         !matches!(value, Value::Nil | Value::Boolean(false))
+    }
+}
+
+impl From<&Value> for i64 {
+    fn from(v: &Value) -> Self {
+        match v {
+            Value::Interger(v) => *v,
+            Value::Float(v) => *v as i64,
+            Value::ShortStr(_, _) => todo!("tonumber"),
+            Value::MidStr(_) => todo!("tonumber"),
+            Value::LongStr(_) => todo!("tonumber"),
+            _ => panic!("invalid string value"),
+        }
     }
 }
